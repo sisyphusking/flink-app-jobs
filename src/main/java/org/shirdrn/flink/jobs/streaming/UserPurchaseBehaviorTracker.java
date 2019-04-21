@@ -123,7 +123,7 @@ public class UserPurchaseBehaviorTracker {
             return Config.buildConfig(value);
           }
         })
-        .broadcast(configStateDescriptor);
+        .broadcast(configStateDescriptor); //这里将配置广播给所有的下游算子， 并且将这个状态进行保存，避免kafka中消费完了就没有配置数据了。
 
     final FlinkKafkaProducer010 kafkaProducer = new FlinkKafkaProducer010<>(
         parameterTool.getRequired("output-topic"),
@@ -143,24 +143,30 @@ public class UserPurchaseBehaviorTracker {
   private static class ConnectedBroadcastProcessFuntion extends
       KeyedBroadcastProcessFunction<String, UserEvent, Config, EvaluatedResult> {
 
+    //默认配置值
     private final Config defaultConfig = new Config();
 
     public ConnectedBroadcastProcessFuntion() {
       super();
     }
 
+    //存储用户操作行为事件的状态变量
     // (channel, Map<uid, UserEventContainer>)
+    //UserEventContainer内部封装了一个List，用来保存属于同一个用户的UserEvent列表。
     private final MapStateDescriptor<String, Map<String, UserEventContainer>> userMapStateDesc =
         new MapStateDescriptor<>(
             "userEventContainerState",
             BasicTypeInfo.STRING_TYPE_INFO,
             new MapTypeInfo<>(String.class, UserEventContainer.class));
 
+    //处理广播中的流
     @Override
     public void processBroadcastElement(Config value, Context ctx, Collector<EvaluatedResult> out)
         throws Exception {
+      //value是最新传入的配置
       String channel = value.getChannel();
       BroadcastState<String, Config> state = ctx.getBroadcastState(configStateDescriptor);
+      //oldConfig是之前保存的旧的配置
       final Config oldConfig = ctx.getBroadcastState(configStateDescriptor).get(channel);
       if(state.contains(channel)) {
         LOG.info("Configured channel exists: channel=" + channel);
@@ -169,16 +175,19 @@ public class UserPurchaseBehaviorTracker {
         LOG.info("Config detail: defaultConfig=" + defaultConfig + ", newConfig=" + value);
       }
       // update config value for configKey
+      //将配置更新到configStateDescriptor中
       state.put(channel, value);
     }
 
+    //处理用户操作行为的流
     @Override
     public void processElement(UserEvent value, ReadOnlyContext ctx,
         Collector<EvaluatedResult> out) throws Exception {
       String userId = value.getUserId();
       String channel = value.getChannel();
-
+      //获取事件类型
       EventType eventType = EventType.valueOf(value.getEventType());
+      //获取最新的配置
       Config config = ctx.getBroadcastState(configStateDescriptor).get(channel);
       LOG.info("Read config: channel=" + channel + ", config=" + config);
       if (Objects.isNull(config)) {
@@ -189,6 +198,7 @@ public class UserPurchaseBehaviorTracker {
           getRuntimeContext().getMapState(userMapStateDesc);
 
       // collect per-user events to the user map state
+      //到达的每个用户的操作行为事件，会首先保存到userMapStateDesc这个MapStateDescriptor类型的状态变量中
       Map<String, UserEventContainer> userEventContainerMap = state.get(channel);
       if (Objects.isNull(userEventContainerMap)) {
         userEventContainerMap = Maps.newHashMap();
